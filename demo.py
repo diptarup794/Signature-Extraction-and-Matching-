@@ -98,6 +98,33 @@ def convert_pdf_to_images(pdf_file):
         st.error(f"Error converting PDF: {str(e)}")
         raise
 
+
+
+def detect_signature(image_path):
+    """Detect if a signature is present using edge detection"""
+    try:
+        # Read image
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(img, (5, 5), 0)
+        
+        # Detect edges using Canny
+        edges = cv2.Canny(blurred, 50, 150)
+        
+        # Count non-zero pixels (edges)
+        edge_pixels = np.count_nonzero(edges)
+        
+        # Calculate percentage of edge pixels
+        total_pixels = edges.shape[0] * edges.shape[1]
+        edge_percentage = (edge_pixels / total_pixels) * 100
+        
+        # Return True if edge percentage is above threshold (indicating signature presence)
+        return edge_percentage > 0.5
+    except Exception as e:
+        st.error(f"Error detecting signature: {str(e)}")
+        raise
+
 def save_signature(image_path, coordinates, holder_type, y_offset=0.85):
     try:
         with Image.open(image_path) as img:
@@ -127,6 +154,13 @@ def save_signature(image_path, coordinates, holder_type, y_offset=0.85):
             cropped = img.crop((x_min, y_min, x_max, y_max))
             output_path = os.path.join(TEMP_DIR, 'signatures', f"signature_{holder_type}_holder.png")
             cropped.save(output_path, "PNG")
+            
+            # Check if signature is present
+            has_signature = detect_signature(output_path)
+            if not has_signature:
+                os.remove(output_path)
+                return None
+                
             return output_path
     except Exception as e:
         st.error(f"Error saving signature: {str(e)}")
@@ -195,84 +229,102 @@ def compare_signatures(uploaded_file, extracted_signature_path):
         st.error(f"Error comparing signatures: {str(e)}")
         raise
 
+
+
 def main():
     st.title("Signature Verification System")
     
     if 'signatures' not in st.session_state:
         st.session_state.signatures = {}
     
-    tab1, tab2 = st.tabs(["Extract Signatures", "Compare Signatures"])
+    if 'pdf_processed' not in st.session_state:
+        st.session_state.pdf_processed = False
     
-    with tab1:
-        st.header("Upload PDF Document")
-        uploaded_file = st.file_uploader("Choose PDF file", type="pdf")
-        
-        if uploaded_file is not None and st.button("Process PDF"):
-            try:
-                page_images = convert_pdf_to_images(uploaded_file)
+    st.header("Upload PDF Document")
+    uploaded_file = st.file_uploader("Choose PDF file", type="pdf")
+    
+    if uploaded_file is not None and st.button("Process PDF"):
+        try:
+            st.session_state.signatures = {}  # Clear previous signatures
+            page_images = convert_pdf_to_images(uploaded_file)
+            
+            with st.spinner("Extracting signatures..."):
+                progress_bar = st.progress(0)
                 
-                with st.spinner("Extracting signatures..."):
-                    progress_bar = st.progress(0)
+                for idx, sig_config in enumerate(SIGNATURES_CONFIG):
+                    page_image = page_images[sig_config["page"] - 1]
+                    sig_path = save_signature(
+                        page_image,
+                        sig_config["coordinates"],
+                        sig_config["holder"],
+                        sig_config["y_offset"]
+                    )
                     
-                    for idx, sig_config in enumerate(SIGNATURES_CONFIG):
-                        page_image = page_images[sig_config["page"] - 1]
-                        sig_path = save_signature(
-                            page_image,
-                            sig_config["coordinates"],
-                            sig_config["holder"],
-                            sig_config["y_offset"]
-                        )
+                    if sig_path:  # Only store if signature was detected
                         st.session_state.signatures[sig_config["holder"]] = sig_path
-                        progress_bar.progress(float((idx + 1) / len(SIGNATURES_CONFIG)))
-                
-                st.success("Signatures extracted!")
-                
-                cols = st.columns(3)
-                for idx, holder in enumerate(['1st', '2nd', '3rd']):
-                    if holder in st.session_state.signatures:
-                        cols[idx].image(st.session_state.signatures[holder], 
-                                      caption=f"{holder} Holder's Signature")
+                    
+                    progress_bar.progress(float((idx + 1) / len(SIGNATURES_CONFIG)))
             
-            except Exception as e:
-                st.error(f"Error processing PDF: {str(e)}")
+            if st.session_state.signatures:
+                st.success("Signatures extracted successfully!")
+                st.session_state.pdf_processed = True
+            else:
+                st.error("No signatures were detected in the document.")
+                st.session_state.pdf_processed = False
+        
+        except Exception as e:
+            st.error(f"Error processing PDF: {str(e)}")
+            st.session_state.pdf_processed = False
     
-    with tab2:
-        st.header("Compare Signatures")
+    # Display extracted signatures if available
+    if st.session_state.signatures:
+        st.subheader("Extracted Signatures")
+        available_holders = list(st.session_state.signatures.keys())
+        cols = st.columns(len(available_holders))
+        for idx, holder in enumerate(available_holders):
+            cols[idx].image(st.session_state.signatures[holder], 
+                          caption=f"{holder} Holder's Signature")
         
-        if not st.session_state.signatures:
-            st.warning("Please process a PDF first in the Extract Signatures tab.")
-            return
+        # Only show signature upload after PDF processing
+        st.subheader("Compare Signatures")
+        uploaded_signature = st.file_uploader("Upload Signature to Compare", 
+                                            type=['png', 'jpg', 'jpeg'])
         
-        results = []
-        for holder in ['1st', '2nd', '3rd']:
-            st.subheader(f"{holder} Holder's Signature")
-            uploaded_sig = st.file_uploader(f"Upload {holder} holder's signature", 
-                                          type=['png', 'jpg', 'jpeg'], 
-                                          key=holder)
-            
-            if uploaded_sig:
-                try:
-                    if holder not in st.session_state.signatures:
-                        st.error(f"No extracted signature for {holder} holder.")
-                        continue
-                    
-                    extracted_sig_path = st.session_state.signatures[holder]
-                    
-                    st.image([uploaded_sig, extracted_sig_path], 
-                           caption=[f"Uploaded {holder} Signature", 
-                                  f"Extracted {holder} Signature"])
-                    
-                    similarity = compare_signatures(uploaded_sig, extracted_sig_path)
+        if uploaded_signature:
+            try:
+                # Display uploaded signature
+                st.image(uploaded_signature, caption="Uploaded Signature", width=200)
+                
+                # Compare with all extracted signatures
+                results = []
+                for holder in st.session_state.signatures.keys():
+                    similarity = compare_signatures(uploaded_signature, 
+                                                 st.session_state.signatures[holder])
                     results.append((holder, similarity))
                 
-                except Exception as e:
-                    st.error(f"Error comparing signatures: {str(e)}")
-        
-        if results:
-            st.subheader("Results")
-            for holder, score in results:
-                message = "Match" if score >= 0.9 else "No Match"
-                st.write(f"{holder} Holder: {message} (Score: {score:.2f})")
+                # Display results in a table
+                results_df = {
+                    "Holder": [],
+                    "Match Percentage": [],
+                    "Status": []
+                }
+                
+                for holder, score in results:
+                    results_df["Holder"].append(holder)
+                    results_df["Match Percentage"].append(f"{score * 100:.2f}%")
+                    results_df["Status"].append("Match" if score >= 0.9 else "No Match")
+                
+                st.table(results_df)
+                
+                # Find best match
+                best_match = max(results, key=lambda x: x[1])
+                if best_match[1] >= 0.9:
+                    st.success(f"Best match: {best_match[0]} Holder with {best_match[1]*100:.2f}% similarity")
+                else:
+                    st.warning("No strong matches found in any extracted signatures")
+                
+            except Exception as e:
+                st.error(f"Error comparing signatures: {str(e)}")
 
 if __name__ == "__main__":
     main()
